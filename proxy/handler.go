@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-api-proxy/auth"
@@ -113,18 +114,22 @@ func (h *Handler) refreshAllAccounts() {
 
 		// 检查 token 是否需要刷新
 		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-300 {
-			newAccessToken, newRefreshToken, newExpiresAt, err := auth.RefreshToken(account)
+			res, err := auth.RefreshToken(account)
 			if err != nil {
+				h.handleRefreshErr(account, err)
 				fmt.Printf("[BackgroundRefresh] Token refresh failed for %s: %v\n", account.Email, err)
 				continue
 			}
-			account.AccessToken = newAccessToken
-			if newRefreshToken != "" {
-				account.RefreshToken = newRefreshToken
+			account.AccessToken = res.AccessToken
+			if res.RefreshToken != "" {
+				account.RefreshToken = res.RefreshToken
 			}
-			account.ExpiresAt = newExpiresAt
-			config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
-			h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+			account.ExpiresAt = res.ExpiresAt
+			if res.ProfileArn != "" {
+				account.ProfileArn = res.ProfileArn
+			}
+			config.UpdateAccountTokenFull(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
+			h.pool.UpdateToken(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt)
 		}
 
 		// 刷新账户信息
@@ -282,6 +287,8 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// fallback 静态列表
 		models = []map[string]interface{}{
+			buildModelInfo("claude-opus-4.7", "anthropic", true),
+			buildModelInfo("claude-opus-4.7"+thinkingSuffix, "anthropic", true),
 			buildModelInfo("claude-sonnet-4.6", "anthropic", true),
 			buildModelInfo("claude-sonnet-4.6"+thinkingSuffix, "anthropic", true),
 			buildModelInfo("claude-opus-4.6", "anthropic", true),
@@ -330,6 +337,9 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		"output": []string{"text"},
 	}
 
+	contextWindow := GetContextWindowSize(id)
+	const maxOutputTokens = 64_000
+
 	return map[string]interface{}{
 		"id":               id,
 		"object":           "model",
@@ -337,6 +347,9 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		"supports_image":   supportsImage,
 		"input_modalities": modalities,
 		"modalities":       modalitiesMap,
+		"context_length":   contextWindow,
+		"context_window":   contextWindow,
+		"max_tokens":       maxOutputTokens,
 		"capabilities": map[string]bool{
 			"vision":       supportsImage,
 			"image":        supportsImage,
@@ -344,6 +357,8 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		},
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{
+				"context_window":    contextWindow,
+				"max_output_tokens": maxOutputTokens,
 				"capabilities": map[string]bool{
 					"vision":       supportsImage,
 					"image_vision": supportsImage,
@@ -964,8 +979,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 	// 合并 thinking 内容（如果有 reasoningContentEvent 的内容）
 	thinkingFormat := config.GetThinkingConfig().ClaudeFormat
 	finalContent, extractedReasoning := extractThinkingFromContent(content)
-	if thinking && thinkingContent == "" && extractedReasoning != "" {
-		thinkingContent = extractedReasoning
+	// 合并流式 reasoning 与 <thinking> 标签内的内容；非 thinking 模式下丢弃。
+	if thinking && extractedReasoning != "" {
+		if thinkingContent == "" {
+			thinkingContent = extractedReasoning
+		} else {
+			thinkingContent += extractedReasoning
+		}
 	}
 	if !thinking {
 		thinkingContent = ""
@@ -1495,21 +1515,24 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		return nil
 	}
 
-	accessToken, refreshToken, expiresAt, err := auth.RefreshToken(account)
+	res, err := auth.RefreshToken(account)
 	if err != nil {
-		return err
+		return h.handleRefreshErr(account, err)
 	}
 
 	// 更新内存
-	h.pool.UpdateToken(account.ID, accessToken, refreshToken, expiresAt)
-	account.AccessToken = accessToken
-	if refreshToken != "" {
-		account.RefreshToken = refreshToken
+	h.pool.UpdateToken(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt)
+	account.AccessToken = res.AccessToken
+	if res.RefreshToken != "" {
+		account.RefreshToken = res.RefreshToken
 	}
-	account.ExpiresAt = expiresAt
+	account.ExpiresAt = res.ExpiresAt
+	if res.ProfileArn != "" {
+		account.ProfileArn = res.ProfileArn
+	}
 
 	// 持久化
-	config.UpdateAccountToken(account.ID, accessToken, refreshToken, expiresAt)
+	config.UpdateAccountTokenFull(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
 
 	return nil
 }
@@ -1791,14 +1814,19 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 			// 刷新 token
 			if account.RefreshToken != "" {
-				if newAccess, newRefresh, newExpires, err := auth.RefreshToken(account); err == nil {
-					account.AccessToken = newAccess
-					if newRefresh != "" {
-						account.RefreshToken = newRefresh
+				if res, err := auth.RefreshToken(account); err != nil {
+					h.handleRefreshErr(account, err)
+				} else {
+					account.AccessToken = res.AccessToken
+					if res.RefreshToken != "" {
+						account.RefreshToken = res.RefreshToken
 					}
-					account.ExpiresAt = newExpires
-					config.UpdateAccountToken(id, newAccess, newRefresh, newExpires)
-					h.pool.UpdateToken(id, newAccess, newRefresh, newExpires)
+					account.ExpiresAt = res.ExpiresAt
+					if res.ProfileArn != "" {
+						account.ProfileArn = res.ProfileArn
+					}
+					config.UpdateAccountTokenFull(id, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
+					h.pool.UpdateToken(id, res.AccessToken, res.RefreshToken, res.ExpiresAt)
 				}
 			}
 			// 刷新账户信息
@@ -1812,7 +1840,7 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		h.pool.Reload()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
+			"success":   true,
 			"refreshed": successCount,
 			"failed":    failCount,
 		})
@@ -2095,12 +2123,6 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RefreshToken == "" {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
-		return
-	}
-
 	// 设置默认值
 	if req.Region == "" {
 		req.Region = "us-east-1"
@@ -2108,6 +2130,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if req.AuthMethod == "" {
 		if req.ClientID != "" {
 			req.AuthMethod = "idc"
+		} else if req.RefreshToken == "" && req.AccessToken != "" {
+			req.AuthMethod = "api_key"
 		} else {
 			req.AuthMethod = "social"
 		}
@@ -2118,12 +2142,29 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		req.AuthMethod = "idc"
 	case "social", "google", "github":
 		req.AuthMethod = "social"
+	case "api_key", "apikey", "kiro_api_key":
+		req.AuthMethod = "api_key"
 	default:
 		if req.ClientID != "" && req.ClientSecret != "" {
 			req.AuthMethod = "idc"
+		} else if req.RefreshToken == "" && req.AccessToken != "" {
+			req.AuthMethod = "api_key"
 		} else {
 			req.AuthMethod = "social"
 		}
+	}
+
+	// API Key 凭据：accessToken 就是 API Key，无需 refreshToken
+	if req.AuthMethod == "api_key" {
+		if req.AccessToken == "" {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "accessToken (API Key) is required for api_key auth"})
+			return
+		}
+	} else if req.RefreshToken == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "refreshToken is required"})
+		return
 	}
 
 	// 始终尝试用 refreshToken 刷新获取新的 accessToken
@@ -2136,7 +2177,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		AuthMethod:   req.AuthMethod,
 		Region:       req.Region,
 	}
-	newAccessToken, newRefreshToken, newExpiresAt, err := auth.RefreshToken(tempAccount)
+	res, err := auth.RefreshToken(tempAccount)
 	if err != nil {
 		// 刷新失败，如果有传入的 accessToken 则尝试使用
 		if req.AccessToken != "" {
@@ -2148,11 +2189,14 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		accessToken = newAccessToken
-		if newRefreshToken != "" {
-			req.RefreshToken = newRefreshToken
+		accessToken = res.AccessToken
+		if res.RefreshToken != "" {
+			req.RefreshToken = res.RefreshToken
 		}
-		expiresAt = newExpiresAt
+		expiresAt = res.ExpiresAt
+		if res.ProfileArn != "" {
+			tempAccount.ProfileArn = res.ProfileArn
+		}
 	}
 
 	// 获取用户信息
@@ -2284,17 +2328,20 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		if account.RefreshToken == "" {
 			return nil
 		}
-		newAccessToken, newRefreshToken, newExpiresAt, err := auth.RefreshToken(account)
+		res, err := auth.RefreshToken(account)
 		if err != nil {
-			return err
+			return h.handleRefreshErr(account, err)
 		}
-		account.AccessToken = newAccessToken
-		if newRefreshToken != "" {
-			account.RefreshToken = newRefreshToken
+		account.AccessToken = res.AccessToken
+		if res.RefreshToken != "" {
+			account.RefreshToken = res.RefreshToken
 		}
-		account.ExpiresAt = newExpiresAt
-		config.UpdateAccountToken(id, newAccessToken, newRefreshToken, newExpiresAt)
-		h.pool.UpdateToken(id, newAccessToken, newRefreshToken, newExpiresAt)
+		account.ExpiresAt = res.ExpiresAt
+		if res.ProfileArn != "" {
+			account.ProfileArn = res.ProfileArn
+		}
+		config.UpdateAccountTokenFull(id, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
+		h.pool.UpdateToken(id, res.AccessToken, res.RefreshToken, res.ExpiresAt)
 		return nil
 	}
 
@@ -2707,4 +2754,24 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(data)
+}
+
+// handleRefreshErr 统一处理 RefreshToken 失败：若为 invalid_grant，立即禁用账号
+// 并触发账号池重载。
+//
+// 返回值与传入的 err 相同，便于链式使用：
+//
+//	if err := h.handleRefreshErr(account, auth.RefreshToken(...)); err != nil { ... }
+func (h *Handler) handleRefreshErr(account *config.Account, err error) error {
+	if account == nil || err == nil {
+		return err
+	}
+	if errors.Is(err, auth.ErrInvalidGrant) {
+		_ = config.DisableAccount(account.ID, err.Error())
+		if h.pool != nil {
+			h.pool.Reload()
+		}
+		fmt.Printf("[Refresh] Account %s disabled (invalid_grant)\n", account.Email)
+	}
+	return err
 }

@@ -196,3 +196,28 @@ func TestClaudeConversationIDStableFromAnchor(t *testing.T) {
 		t.Fatalf("expected stable conversation ID across turns, got %q vs %q", payloadA.ConversationState.ConversationID, payloadB.ConversationState.ConversationID)
 	}
 }
+
+func TestMapModelHandlesOpus47(t *testing.T) {
+	cases := map[string]string{
+		"claude-opus-4-7":          "claude-opus-4.7",
+		"claude-opus-4.7":          "claude-opus-4.7",
+		"claude-opus-4-7-thinking": "claude-opus-4.7",
+	}
+	for input, want := range cases {
+		if got := MapModel(input); got != want {
+			t.Fatalf("MapModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestGetContextWindowSize1MModels(t *testing.T) {
+	oneMillion := []string{"claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"}
+	for _, m := range oneMillion {
+		if got := GetContextWindowSize(m); got != 1_000_000 {
+			t.Fatalf("GetContextWindowSize(%q) = %d, want 1_000_000", m, got)
+		}
+	}
+	if got := GetContextWindowSize("claude-opus-4-5"); got != 200_000 {
+		t.Fatalf("GetContextWindowSize(opus-4.5) = %d, want 200_000", got)
+	}
+}

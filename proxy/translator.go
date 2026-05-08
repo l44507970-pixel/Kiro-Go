@@ -28,6 +28,8 @@ var modelMapOrdered = []modelMapping{
 	{"claude-opus-4.5", "claude-opus-4.5"},
 	{"claude-opus-4-6", "claude-opus-4.6"},
 	{"claude-opus-4.6", "claude-opus-4.6"},
+	{"claude-opus-4-7", "claude-opus-4.7"},
+	{"claude-opus-4.7", "claude-opus-4.7"},
 	{"claude-sonnet-4", "claude-sonnet-4"},
 	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
 	{"claude-3-opus", "claude-sonnet-4.5"},
@@ -76,6 +78,17 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 func MapModel(model string) string {
 	mapped, _ := ParseModelAndThinking(model, "-thinking")
 	return mapped
+}
+
+// GetContextWindowSize 返回模型的上下文窗口大小（tokens）。
+//
+// Kiro 于 2026-03-24 将 Sonnet/Opus 4.6 升级至 1M 上下文，其余维持 200K。
+func GetContextWindowSize(model string) int {
+	mapped := MapModel(model)
+	if mapped == "claude-sonnet-4.6" || mapped == "claude-opus-4.6" || mapped == "claude-opus-4.7" {
+		return 1_000_000
+	}
+	return 200_000
 }
 
 // ==================== Claude API 类型 ====================
@@ -431,28 +444,11 @@ func convertClaudeTools(tools []ClaudeTool) []KiroToolWrapper {
 			desc = desc[:maxToolDescLen] + "..."
 		}
 		result[i] = KiroToolWrapper{}
-		result[i].ToolSpecification.Name = shortenToolName(tool.Name)
+		result[i].ToolSpecification.Name = shortenToolNameWithMap(tool.Name)
 		result[i].ToolSpecification.Description = desc
 		result[i].ToolSpecification.InputSchema = InputSchema{JSON: tool.InputSchema}
 	}
 	return result
-}
-
-func shortenToolName(name string) string {
-	if len(name) <= 64 {
-		return name
-	}
-	// MCP tools: mcp__server__tool -> mcp__tool
-	if strings.HasPrefix(name, "mcp__") {
-		lastIdx := strings.LastIndex(name, "__")
-		if lastIdx > 5 {
-			shortened := "mcp__" + name[lastIdx+2:]
-			if len(shortened) <= 64 {
-				return shortened
-			}
-		}
-	}
-	return name[:64]
 }
 
 // ==================== Kiro -> Claude 转换 ====================
@@ -1060,7 +1056,7 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 			desc = desc[:maxToolDescLen] + "..."
 		}
 		wrapper := KiroToolWrapper{}
-		wrapper.ToolSpecification.Name = shortenToolName(tool.Function.Name)
+		wrapper.ToolSpecification.Name = shortenToolNameWithMap(tool.Function.Name)
 		wrapper.ToolSpecification.Description = desc
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: tool.Function.Parameters}
 		result = append(result, wrapper)

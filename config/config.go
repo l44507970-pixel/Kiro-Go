@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 // GenerateMachineId generates a UUID v4 format machine identifier.
@@ -49,6 +50,7 @@ type Account struct {
 	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
+	ProfileArn   string `json:"profileArn,omitempty"`   // AWS profile ARN (从 token 刷新响应中提取，由 provider 注入到 Kiro 请求体)
 
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
@@ -277,6 +279,13 @@ func DeleteAccount(id string) error {
 }
 
 func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) error {
+	return UpdateAccountTokenFull(id, accessToken, refreshToken, expiresAt, "")
+}
+
+// UpdateAccountTokenFull 更新账号 token 及可选的 profileArn。
+//
+// 空字符串字段不会覆盖已有值，便于刷新响应缺字段时保留旧数据。
+func UpdateAccountTokenFull(id, accessToken, refreshToken string, expiresAt int64, profileArn string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
@@ -286,6 +295,9 @@ func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) e
 				cfg.Accounts[i].RefreshToken = refreshToken
 			}
 			cfg.Accounts[i].ExpiresAt = expiresAt
+			if profileArn != "" {
+				cfg.Accounts[i].ProfileArn = profileArn
+			}
 			return Save()
 		}
 	}
@@ -439,4 +451,25 @@ func UpdatePreferredEndpoint(endpoint string) error {
 	defer cfgLock.Unlock()
 	cfg.PreferredEndpoint = endpoint
 	return Save()
+}
+
+// DisableAccount 标记账号为禁用，并记录原因。
+//
+// 用于刷新 token 返回 invalid_grant 等永久性失败时，立刻把凭据下线，
+// 不再走累计重试。
+func DisableAccount(id, reason string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].Enabled = false
+			cfg.Accounts[i].BanStatus = "DISABLED"
+			if reason != "" {
+				cfg.Accounts[i].BanReason = reason
+			}
+			cfg.Accounts[i].BanTime = time.Now().Unix()
+			return Save()
+		}
+	}
+	return nil
 }

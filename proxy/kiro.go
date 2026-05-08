@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"kiro-api-proxy/auth"
 	"kiro-api-proxy/config"
 	"net/http"
 	"strconv"
@@ -16,7 +17,25 @@ import (
 	"github.com/google/uuid"
 )
 
-const KiroVersion = "0.7.45"
+const (
+	KiroVersion   = "0.11.107"
+	AwsSdkVersion = "1.0.34"
+	NodeVersion   = "22.22.0"
+)
+
+// BuildKiroUserAgent 构造 Kiro 请求的 User-Agent / x-amz-user-agent
+func BuildKiroUserAgent(machineId string) (userAgent, amzUserAgent string) {
+	if machineId != "" {
+		userAgent = fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/linux lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s-%s",
+			AwsSdkVersion, NodeVersion, AwsSdkVersion, KiroVersion, machineId)
+		amzUserAgent = fmt.Sprintf("aws-sdk-js/%s KiroIDE %s %s", AwsSdkVersion, KiroVersion, machineId)
+		return
+	}
+	userAgent = fmt.Sprintf("aws-sdk-js/%s ua/2.1 os/linux lang/js md/nodejs#%s api/codewhispererstreaming#%s m/E KiroIDE-%s",
+		AwsSdkVersion, NodeVersion, AwsSdkVersion, KiroVersion)
+	amzUserAgent = fmt.Sprintf("aws-sdk-js/%s KiroIDE %s", AwsSdkVersion, KiroVersion)
+	return
+}
 
 // 双端点配置（429 时自动 fallback）
 type kiroEndpoint struct {
@@ -164,21 +183,18 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		return err
 	}
 
+	// 由 provider 动态注入 profileArn：始终以当前凭据为准，避免凭据切换/刷新后
+	// 仍带着旧 ARN。
+	payload.ProfileArn = account.ProfileArn
+
 	// User-Agent
-	machineId := account.MachineId
-	var userAgent, amzUserAgent string
-	if machineId != "" {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/linux lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s-%s", KiroVersion, machineId)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s %s", KiroVersion, machineId)
-	} else {
-		userAgent = fmt.Sprintf("aws-sdk-js/1.0.27 ua/2.1 os/linux lang/js md/nodejs#22.21.1 api/codewhispererstreaming#1.0.27 m/E KiroIDE-%s", KiroVersion)
-		amzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.27 KiroIDE %s", KiroVersion)
-	}
+	userAgent, amzUserAgent := BuildKiroUserAgent(account.MachineId)
 
 	// 根据配置排序端点
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
 
 	var lastErr error
+	var refreshed bool // 单请求生命周期内最多自动刷新一次 token
 	for _, ep := range endpoints {
 		// 更新 payload 中的 origin
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
@@ -200,6 +216,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
+		if account.AuthMethod == "api_key" {
+			req.Header.Set("tokentype", "API_KEY")
+		}
 
 		resp, err := kiroHttpClient.Do(req)
 		if err != nil {
@@ -219,7 +238,51 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			lastErr = fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, ep.Name, string(errBody))
-			// 认证错误不继续尝试
+			// 401/403：accessToken 可能被上游提前失效。强制刷新一次后重试当前请求；
+			// 这是单账号本地修复，不影响其他凭据。
+			if (resp.StatusCode == 401 || resp.StatusCode == 403) && !refreshed && account.RefreshToken != "" {
+				refreshed = true
+				if res, rerr := auth.RefreshToken(account); rerr == nil && res.AccessToken != "" {
+					account.AccessToken = res.AccessToken
+					if res.RefreshToken != "" {
+						account.RefreshToken = res.RefreshToken
+					}
+					account.ExpiresAt = res.ExpiresAt
+					if res.ProfileArn != "" {
+						account.ProfileArn = res.ProfileArn
+						payload.ProfileArn = res.ProfileArn
+					}
+					config.UpdateAccountTokenFull(account.ID, res.AccessToken, res.RefreshToken, res.ExpiresAt, res.ProfileArn)
+					fmt.Printf("[KiroAPI] %d on %s: refreshed token, retrying\n", resp.StatusCode, ep.Name)
+					// 在当前端点立即重试一次
+					reqBody2, _ := json.Marshal(payload)
+					req2, _ := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody2))
+					req2.Header.Set("Content-Type", "application/json")
+					req2.Header.Set("Accept", "*/*")
+					req2.Header.Set("X-Amz-Target", ep.AmzTarget)
+					req2.Header.Set("User-Agent", userAgent)
+					req2.Header.Set("X-Amz-User-Agent", amzUserAgent)
+					req2.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+					req2.Header.Set("x-amzn-codewhisperer-optout", "true")
+					req2.Header.Set("Amz-Sdk-Request", "attempt=2; max=3")
+					req2.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+					req2.Header.Set("Authorization", "Bearer "+account.AccessToken)
+					if account.AuthMethod == "api_key" {
+						req2.Header.Set("tokentype", "API_KEY")
+					}
+					resp2, err2 := kiroHttpClient.Do(req2)
+					if err2 == nil {
+						if resp2.StatusCode == 200 {
+							err := parseEventStream(resp2.Body, callback)
+							resp2.Body.Close()
+							return err
+						}
+						eb2, _ := io.ReadAll(resp2.Body)
+						resp2.Body.Close()
+						lastErr = fmt.Errorf("HTTP %d from %s after refresh: %s", resp2.StatusCode, ep.Name, string(eb2))
+					}
+				}
+			}
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				return lastErr
 			}
@@ -521,7 +584,7 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) {
 	}
 	callback.OnToolUse(KiroToolUse{
 		ToolUseID: state.ToolUseID,
-		Name:      state.Name,
+		Name:      RestoreToolName(state.Name),
 		Input:     input,
 	})
 }

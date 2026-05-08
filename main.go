@@ -46,6 +46,11 @@ func main() {
 		config.SetPassword(envPassword)
 	}
 
+	// 环境变量 KIRO_API_KEY：注入 Kiro CLI headless 模式凭据
+	if envApiKey := os.Getenv("KIRO_API_KEY"); envApiKey != "" {
+		ensureApiKeyAccount(envApiKey)
+	}
+
 	// 初始化账号池
 	pool.GetPool()
 
@@ -62,4 +67,38 @@ func main() {
 	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// ensureApiKeyAccount 确保配置里存在以指定 API Key 作为 access token 的凭据。
+//
+// 同一 API Key 多次启动只保留一份；启动失败仅打印日志，不阻断主流程。
+func ensureApiKeyAccount(apiKey string) {
+	for _, a := range config.GetAccounts() {
+		if a.AuthMethod == "api_key" && a.AccessToken == apiKey {
+			return
+		}
+	}
+	account := config.Account{
+		ID:          uuidLikeID(),
+		Nickname:    "KIRO_API_KEY",
+		AccessToken: apiKey,
+		AuthMethod:  "api_key",
+		Provider:    "ApiKey",
+		Region:      "us-east-1",
+		Enabled:     true,
+		MachineId:   config.GenerateMachineId(),
+	}
+	if err := config.AddAccount(account); err != nil {
+		log.Printf("[KIRO_API_KEY] failed to register: %v", err)
+		return
+	}
+	log.Printf("[KIRO_API_KEY] registered headless credential id=%s", account.ID)
+}
+
+// uuidLikeID 用 config 包内的随机生成器构造一个 UUID 形式的字符串。
+//
+// 不直接 import google/uuid 是为了让 main.go 仅依赖标准库；config.GenerateMachineId
+// 已用 crypto/rand 给出 UUID v4 形式，复用即可。
+func uuidLikeID() string {
+	return config.GenerateMachineId()
 }
