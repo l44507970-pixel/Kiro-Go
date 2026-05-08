@@ -32,6 +32,8 @@ var modelMapOrdered = []modelMapping{
 	{"claude-opus-4-7", "claude-opus-4.7"},
 	{"claude-opus-4.7", "claude-opus-4.7"},
 	{"claude-sonnet-4", "claude-sonnet-4"},
+	{"claude-3-7-sonnet-20250219", "claude-3-7-sonnet-20250219"},
+	{"claude-3-7-sonnet", "claude-3-7-sonnet-20250219"},
 	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
 	{"claude-3-opus", "claude-sonnet-4.5"},
 	{"claude-3-sonnet", "claude-sonnet-4"},
@@ -1218,31 +1220,88 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 	}
 }
 
-// extractThinkingFromContent 从内容中提取 <thinking> 标签内的内容
+// isQuoteCharAt 判断指定位置是否为引号/反引号字符。
+func isQuoteCharAt(s string, idx int) bool {
+	if idx < 0 || idx >= len(s) {
+		return false
+	}
+	switch s[idx] {
+	case '"', '\'', '`':
+		return true
+	}
+	return false
+}
+
+// findRealTag 查找未被引号包围的标签位置，避免误识别 thinking 内容里的字面字符串。
+//
+// 算法对齐 AIClient2API/claude-kiro.js::findRealTag：标签前一字符与标签后一字符
+// 都不是引号才算真标签。
+func findRealTag(s, tag string, startIdx int) int {
+	searchStart := startIdx
+	if searchStart < 0 {
+		searchStart = 0
+	}
+	for {
+		pos := strings.Index(s[searchStart:], tag)
+		if pos == -1 {
+			return -1
+		}
+		absPos := searchStart + pos
+		if !isQuoteCharAt(s, absPos-1) && !isQuoteCharAt(s, absPos+len(tag)) {
+			return absPos
+		}
+		searchStart = absPos + 1
+	}
+}
+
+// findRealThinkingEndTag 查找真正的 </thinking> 结束位置：
+//   - 不被引号包围
+//   - 后面紧跟 "\n\n" 或文末仅剩空白
+//
+// 这避免把 thinking 内容里引用的 </thinking> 字面误判为结束。
+func findRealThinkingEndTag(s string, startIdx int) int {
+	const endTag = "</thinking>"
+	searchStart := startIdx
+	if searchStart < 0 {
+		searchStart = 0
+	}
+	for {
+		pos := findRealTag(s, endTag, searchStart)
+		if pos == -1 {
+			return -1
+		}
+		after := s[pos+len(endTag):]
+		if strings.HasPrefix(after, "\n\n") || strings.TrimSpace(after) == "" {
+			return pos
+		}
+		searchStart = pos + 1
+	}
+}
+
+// extractThinkingFromContent 从内容中提取 <thinking>...</thinking> 块内的文本。
+//
+// 使用 findRealTag/findRealThinkingEndTag 跳过被引号包围的字面标签，
+// 避免在 thinking 解释自己时被截断。
 func extractThinkingFromContent(content string) (string, string) {
-	var reasoning string
+	const startTag = "<thinking>"
+	const endTag = "</thinking>"
+	var reasoning strings.Builder
 	result := content
 
 	for {
-		start := strings.Index(result, "<thinking>")
+		start := findRealTag(result, startTag, 0)
 		if start == -1 {
 			break
 		}
-		end := strings.Index(result[start:], "</thinking>")
+		end := findRealThinkingEndTag(result, start+len(startTag))
 		if end == -1 {
 			break
 		}
-		end += start
-
-		// 提取 thinking 内容
-		thinkingContent := result[start+10 : end]
-		reasoning += thinkingContent
-
-		// 从结果中移除 thinking 标签
-		result = result[:start] + result[end+11:]
+		reasoning.WriteString(result[start+len(startTag) : end])
+		result = result[:start] + result[end+len(endTag):]
 	}
 
-	return strings.TrimSpace(result), reasoning
+	return strings.TrimSpace(result), reasoning.String()
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
@@ -1302,4 +1361,106 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			"total_tokens":      inputTokens + outputTokens,
 		},
 	}
+}
+
+// repairLooseJSON 对模型生成的工具调用参数做轻度容错：
+//   - 删除尾逗号（] }, 前的 ,）
+//   - 给未引用的对象键加引号
+//
+// 仅作为 json.Unmarshal 失败时的兜底，不改变合法 JSON 的语义。
+func repairLooseJSON(s string) string {
+	// 尾逗号
+	s = regexp.MustCompile(`,\s*([}\]])`).ReplaceAllString(s, "$1")
+	// 未引用的键名: { foo: ...,  → { "foo": ...,
+	s = regexp.MustCompile(`([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:`).ReplaceAllString(s, `$1"$2":`)
+	return s
+}
+
+// parseBracketToolCalls 从模型文本中识别 "[Called toolname with args: {...}]" 形式的
+// 工具调用字面量，把它们转成 KiroToolUse。
+//
+// 返回剥离工具调用文本后的纯文本和解析出的工具调用列表。当模型在某些 system prompt 下
+// 不走标准 tool_use 协议、把工具调用当文本输出时，依靠这一层兜底恢复成结构化结果。
+//
+// 算法对齐 AIClient2API/claude-kiro.js::parseBracketToolCalls。
+func parseBracketToolCalls(content string) (string, []KiroToolUse) {
+	if !strings.Contains(content, "[Called") {
+		return content, nil
+	}
+	nameRe := regexp.MustCompile(`(?i)\[Called\s+([A-Za-z0-9_\-]+)\s+with\s+args:\s*`)
+	indices := nameRe.FindAllStringSubmatchIndex(content, -1)
+	if len(indices) == 0 {
+		return content, nil
+	}
+
+	var calls []KiroToolUse
+	cleaned := content
+	for i := len(indices) - 1; i >= 0; i-- {
+		m := indices[i]
+		segStart := m[0]
+		argsStart := m[1]
+		// 用括号匹配找配对的 ]
+		end := findMatchingBracketRange(content, segStart)
+		if end == -1 {
+			continue
+		}
+		name := content[m[2]:m[3]]
+		argsRaw := strings.TrimSpace(content[argsStart:end])
+		if argsRaw == "" {
+			continue
+		}
+
+		var input map[string]interface{}
+		if err := json.Unmarshal([]byte(argsRaw), &input); err != nil {
+			if err := json.Unmarshal([]byte(repairLooseJSON(argsRaw)), &input); err != nil {
+				continue
+			}
+		}
+		calls = append([]KiroToolUse{{
+			ToolUseID: "call_" + uuid.New().String()[:8],
+			Name:      name,
+			Input:     input,
+		}}, calls...)
+		cleaned = cleaned[:segStart] + cleaned[end+1:]
+	}
+	return strings.TrimSpace(cleaned), calls
+}
+
+// findMatchingBracketRange 在 s[startIdx] 是 '[' 开始的子串里找对应的 ']' 位置。
+//
+// 跳过字符串字面量内（"..."、'...' 包裹）的括号。返回 -1 表示未找到。
+func findMatchingBracketRange(s string, startIdx int) int {
+	if startIdx < 0 || startIdx >= len(s) || s[startIdx] != '[' {
+		return -1
+	}
+	depth := 0
+	inString := byte(0)
+	escaped := false
+	for i := startIdx; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString != 0 {
+			if c == '\\' {
+				escaped = true
+			} else if c == inString {
+				inString = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			inString = c
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }

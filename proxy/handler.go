@@ -301,6 +301,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			buildModelInfo("claude-haiku-4.5"+thinkingSuffix, "anthropic", true),
 			buildModelInfo("claude-opus-4.5", "anthropic", true),
 			buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
+			buildModelInfo("claude-3-7-sonnet-20250219", "anthropic", true),
 		}
 	}
 	// 添加别名模型
@@ -992,6 +993,13 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, account *config.A
 		thinkingContent = ""
 	}
 
+	// 兜底：模型偶尔会把工具调用以 "[Called X with args: {...}]" 的纯文本形式输出。
+	// 这里把这种文本解析回结构化的 tool_use，避免客户端拿到没法执行的字面量。
+	if cleanedText, bracketCalls := parseBracketToolCalls(finalContent); len(bracketCalls) > 0 {
+		finalContent = cleanedText
+		toolUses = append(toolUses, bracketCalls...)
+	}
+
 	inputTokens = estimatedInputTokens
 	outputTokens = estimateClaudeOutputTokens(finalContent, thinkingContent, toolUses)
 
@@ -1485,6 +1493,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, account *config.A
 		reasoningContent = extractedReasoning
 	} else if !thinking {
 		reasoningContent = ""
+	}
+
+	// 兜底：模型偶尔会把工具调用以 "[Called X with args: {...}]" 的纯文本形式输出。
+	if cleanedText, bracketCalls := parseBracketToolCalls(finalContent); len(bracketCalls) > 0 {
+		finalContent = cleanedText
+		toolUses = append(toolUses, bracketCalls...)
 	}
 
 	inputTokens = estimatedInputTokens

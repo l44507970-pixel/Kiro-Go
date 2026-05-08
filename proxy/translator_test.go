@@ -334,3 +334,116 @@ func TestResolveAndConvertEndToEnd(t *testing.T) {
 		t.Fatalf("modelId mismatch: %q", payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)
 	}
 }
+
+func TestExtractThinkingIgnoresQuotedEndTag(t *testing.T) {
+	// thinking 内容里引用了字面 </thinking>，不应在此处提前截断
+	content := "<thinking>I will explain `</thinking>` tag now.\n\nFinal answer.\n\n</thinking>\n\nResult here."
+	text, reasoning := extractThinkingFromContent(content)
+	if text != "Result here." {
+		t.Fatalf("text = %q, want %q", text, "Result here.")
+	}
+	if !strings.Contains(reasoning, "I will explain") {
+		t.Fatalf("reasoning truncated: %q", reasoning)
+	}
+	if !strings.Contains(reasoning, "Final answer.") {
+		t.Fatalf("expected reasoning to include trailing portion, got %q", reasoning)
+	}
+}
+
+func TestExtractThinkingHandlesEndOfBuffer(t *testing.T) {
+	// </thinking> 紧贴字符串末尾（仅剩空白），也应识别
+	content := "<thinking>only thinking content</thinking>   "
+	text, reasoning := extractThinkingFromContent(content)
+	if text != "" {
+		t.Fatalf("text = %q, want empty", text)
+	}
+	if reasoning != "only thinking content" {
+		t.Fatalf("reasoning = %q", reasoning)
+	}
+}
+
+func TestExtractThinkingMultipleBlocks(t *testing.T) {
+	content := "<thinking>part 1</thinking>\n\nmiddle\n\n<thinking>part 2</thinking>\n\nend"
+	text, reasoning := extractThinkingFromContent(content)
+	if !strings.Contains(reasoning, "part 1") || !strings.Contains(reasoning, "part 2") {
+		t.Fatalf("missing parts: %q", reasoning)
+	}
+	if !strings.Contains(text, "middle") || !strings.Contains(text, "end") {
+		t.Fatalf("text fragments lost: %q", text)
+	}
+}
+
+func TestMapModelHandlesSonnet37(t *testing.T) {
+	cases := map[string]string{
+		"claude-3-7-sonnet-20250219":          "claude-3-7-sonnet-20250219",
+		"claude-3-7-sonnet":                   "claude-3-7-sonnet-20250219",
+		"claude-3-7-sonnet-20250219-thinking": "claude-3-7-sonnet-20250219",
+	}
+	for input, want := range cases {
+		if got := MapModel(input); got != want {
+			t.Fatalf("MapModel(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestParseBracketToolCallsBasic(t *testing.T) {
+	content := "Sure, I'll do that.\n[Called search with args: {\"query\": \"weather\", \"limit\": 5}]\nDone."
+	cleaned, calls := parseBracketToolCalls(content)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Name != "search" {
+		t.Fatalf("name = %q", calls[0].Name)
+	}
+	if calls[0].Input["query"] != "weather" {
+		t.Fatalf("query missing: %#v", calls[0].Input)
+	}
+	if strings.Contains(cleaned, "[Called") {
+		t.Fatalf("bracket text not stripped: %q", cleaned)
+	}
+}
+
+func TestParseBracketToolCallsRepairsLooseJSON(t *testing.T) {
+	// 尾逗号 + 未引号键
+	content := `[Called fetch with args: {url: "https://x", method: "GET",}]`
+	_, calls := parseBracketToolCalls(content)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Input["url"] != "https://x" {
+		t.Fatalf("url = %#v", calls[0].Input["url"])
+	}
+}
+
+func TestParseBracketToolCallsMultiple(t *testing.T) {
+	content := `Step 1: [Called a with args: {"x":1}] Step 2: [Called b with args: {"y":2}] end`
+	cleaned, calls := parseBracketToolCalls(content)
+	if len(calls) != 2 {
+		t.Fatalf("got %d calls, want 2", len(calls))
+	}
+	names := []string{calls[0].Name, calls[1].Name}
+	if !(names[0] == "a" && names[1] == "b") {
+		t.Fatalf("order wrong: %v", names)
+	}
+	if strings.Contains(cleaned, "[Called") {
+		t.Fatalf("brackets not stripped: %q", cleaned)
+	}
+}
+
+func TestParseBracketToolCallsNoMatchPassThrough(t *testing.T) {
+	content := "Plain text response, no tool calls."
+	cleaned, calls := parseBracketToolCalls(content)
+	if len(calls) != 0 {
+		t.Fatalf("unexpected calls: %v", calls)
+	}
+	if cleaned != content {
+		t.Fatalf("text changed: %q", cleaned)
+	}
+}
+
+func TestRepairLooseJSONLeavesValidJSONAlone(t *testing.T) {
+	in := `{"a":1,"b":[1,2,3]}`
+	if got := repairLooseJSON(in); got != in {
+		t.Fatalf("modified valid json: %q", got)
+	}
+}
