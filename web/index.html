@@ -913,6 +913,7 @@
         </div>
         <div class="tabs">
             <div class="tab active" data-tab="accounts" data-i18n="tabs.accounts"></div>
+            <div class="tab" data-tab="logs" data-i18n="tabs.logs"></div>
             <div class="tab" data-tab="settings" data-i18n="tabs.settings"></div>
             <div class="tab" data-tab="api" data-i18n="tabs.api"></div>
         </div>
@@ -953,6 +954,33 @@
                     </div>
                 </div>
                 <div id="accountsList"></div>
+            </div>
+        </div>
+        <div id="tabLogs" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title" data-i18n="logs.title"></span>
+                    <div class="card-actions">
+                        <button class="btn btn-secondary btn-sm" onclick="loadLogs()" data-i18n="logs.refresh"></button>
+                    </div>
+                </div>
+                <div id="logsTableWrapper" style="overflow-x:auto">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                        <thead>
+                            <tr style="border-bottom:2px solid #e2e8f0;text-align:left">
+                                <th style="padding:8px 6px" data-i18n="logs.time"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.model"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.account"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.type"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.tokens"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.duration"></th>
+                                <th style="padding:8px 6px" data-i18n="logs.status"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsBody"></tbody>
+                    </table>
+                </div>
+                <p id="logsEmpty" class="hidden" style="text-align:center;color:#64748b;padding:20px" data-i18n="logs.empty"></p>
             </div>
         </div>
         <div id="tabSettings" class="tab-content hidden">
@@ -1084,8 +1112,21 @@
                 'stats.success': '成功',
                 'stats.failed': '失败',
                 'tabs.accounts': '账号',
+                'tabs.logs': '日志',
                 'tabs.settings': '设置',
                 'tabs.api': 'API',
+                'logs.title': '调用日志',
+                'logs.refresh': '刷新',
+                'logs.time': '时间',
+                'logs.model': '模型',
+                'logs.account': '账号',
+                'logs.type': '类型',
+                'logs.tokens': 'Tokens',
+                'logs.duration': '耗时',
+                'logs.status': '状态',
+                'logs.empty': '暂无日志记录',
+                'logs.success': '成功',
+                'logs.failed': '失败',
                 'accounts.title': '账号列表',
                 'accounts.add': '添加账号',
                 'accounts.empty': '暂无账号',
@@ -1296,8 +1337,21 @@
                 'stats.success': 'Success',
                 'stats.failed': 'Failed',
                 'tabs.accounts': 'Accounts',
+                'tabs.logs': 'Logs',
                 'tabs.settings': 'Settings',
                 'tabs.api': 'API',
+                'logs.title': 'Request Logs',
+                'logs.refresh': 'Refresh',
+                'logs.time': 'Time',
+                'logs.model': 'Model',
+                'logs.account': 'Account',
+                'logs.type': 'Type',
+                'logs.tokens': 'Tokens',
+                'logs.duration': 'Duration',
+                'logs.status': 'Status',
+                'logs.empty': 'No logs yet',
+                'logs.success': 'Success',
+                'logs.failed': 'Failed',
                 'accounts.title': 'Account List',
                 'accounts.add': 'Add Account',
                 'accounts.empty': 'No accounts',
@@ -1653,6 +1707,39 @@
             document.getElementById('statFailed').textContent = d.failedRequests || 0;
             document.getElementById('statTokens').textContent = formatNum(d.totalTokens || 0);
             document.getElementById('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+        }
+        async function loadLogs() {
+            try {
+                const res = await fetch('/admin/api/logs?limit=100', { headers: { 'X-Admin-Password': password } });
+                const d = await res.json();
+                const tbody = document.getElementById('logsBody');
+                const empty = document.getElementById('logsEmpty');
+                if (!d.logs || d.logs.length === 0) {
+                    tbody.innerHTML = '';
+                    empty.classList.remove('hidden');
+                    return;
+                }
+                empty.classList.add('hidden');
+                tbody.innerHTML = d.logs.map(log => {
+                    const time = new Date(log.timestamp * 1000);
+                    const timeStr = time.toLocaleTimeString('zh-CN', { hour12: false }) + ' ' + time.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' });
+                    const statusBadge = log.success
+                        ? `<span class="badge badge-success">${t('logs.success')}</span>`
+                        : `<span class="badge badge-error" title="${log.error || ''}">${t('logs.failed')}</span>`;
+                    const tokens = log.success ? `${formatNum(log.inputTokens)}/${formatNum(log.outputTokens)}` : '-';
+                    const duration = log.duration > 0 ? (log.duration >= 1000 ? (log.duration / 1000).toFixed(1) + 's' : log.duration + 'ms') : '-';
+                    const account = log.account ? maskEmail(log.account) : '-';
+                    return `<tr style="border-bottom:1px solid #f1f5f9">
+                        <td style="padding:8px 6px;white-space:nowrap">${timeStr}</td>
+                        <td style="padding:8px 6px;font-family:monospace;font-size:12px">${log.model || '-'}</td>
+                        <td style="padding:8px 6px">${account}</td>
+                        <td style="padding:8px 6px"><span class="badge badge-info">${log.apiType || '-'}${log.stream ? ' stream' : ''}</span></td>
+                        <td style="padding:8px 6px">${tokens}</td>
+                        <td style="padding:8px 6px">${duration}</td>
+                        <td style="padding:8px 6px">${statusBadge}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) { }
         }
         async function loadAccounts() {
             const res = await fetch('/admin/api/accounts', { headers: { 'X-Admin-Password': password } });
@@ -2059,6 +2146,7 @@
             document.querySelectorAll('.tab').forEach(tabEl => tabEl.classList.toggle('active', tabEl.dataset.tab === tab));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
             document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+            if (tab === 'logs') loadLogs();
         }
         async function toggleAccount(id, enabled) {
             await fetch('/admin/api/accounts/' + id, {
