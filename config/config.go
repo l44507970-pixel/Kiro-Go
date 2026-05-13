@@ -110,6 +110,9 @@ type Config struct {
 	// Endpoint configuration: "auto", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
 
+	// Log retention: 7, 14, or 30 days (0 = 7 days default)
+	LogRetentionDays int `json:"logRetentionDays,omitempty"`
+
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
 	SuccessRequests int     `json:"successRequests,omitempty"` // Successful requests count
@@ -454,6 +457,24 @@ func UpdatePreferredEndpoint(endpoint string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.PreferredEndpoint = endpoint
+	return Save()
+}
+
+// GetLogRetentionDays 获取日志保留天数
+func GetLogRetentionDays() int {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.LogRetentionDays <= 0 {
+		return 7
+	}
+	return cfg.LogRetentionDays
+}
+
+// UpdateLogRetentionDays 更新日志保留天数
+func UpdateLogRetentionDays(days int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LogRetentionDays = days
 	return Save()
 }
 

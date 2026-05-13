@@ -961,7 +961,13 @@
                 <div class="card-header">
                     <span class="card-title" data-i18n="logs.title"></span>
                     <div class="card-actions">
+                        <select id="logRetentionSelect" onchange="updateLogRetention()" style="padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;font-size:13px;background:#fff;cursor:pointer">
+                            <option value="7">7 天</option>
+                            <option value="14">14 天</option>
+                            <option value="30">30 天</option>
+                        </select>
                         <button class="btn btn-secondary btn-sm" onclick="loadLogs()" data-i18n="logs.refresh"></button>
+                        <button class="btn btn-danger btn-sm" onclick="clearLogs()" data-i18n="logs.clear"></button>
                     </div>
                 </div>
                 <div id="logsTableWrapper" style="overflow-x:auto">
@@ -1127,6 +1133,9 @@
                 'logs.empty': '暂无日志记录',
                 'logs.success': '成功',
                 'logs.failed': '失败',
+                'logs.clear': '清除日志',
+                'logs.confirmClear': '确定清除所有日志？',
+                'logs.retention': '保留天数',
                 'accounts.title': '账号列表',
                 'accounts.add': '添加账号',
                 'accounts.empty': '暂无账号',
@@ -1352,6 +1361,9 @@
                 'logs.empty': 'No logs yet',
                 'logs.success': 'Success',
                 'logs.failed': 'Failed',
+                'logs.clear': 'Clear Logs',
+                'logs.confirmClear': 'Clear all logs?',
+                'logs.retention': 'Retention',
                 'accounts.title': 'Account List',
                 'accounts.add': 'Add Account',
                 'accounts.empty': 'No accounts',
@@ -1710,10 +1722,13 @@
         }
         async function loadLogs() {
             try {
-                const res = await fetch('/admin/api/logs?limit=100', { headers: { 'X-Admin-Password': password } });
+                const res = await fetch('/admin/api/logs?limit=200', { headers: { 'X-Admin-Password': password } });
                 const d = await res.json();
                 const tbody = document.getElementById('logsBody');
                 const empty = document.getElementById('logsEmpty');
+                if (d.retentionDays) {
+                    document.getElementById('logRetentionSelect').value = d.retentionDays;
+                }
                 if (!d.logs || d.logs.length === 0) {
                     tbody.innerHTML = '';
                     empty.classList.remove('hidden');
@@ -1740,6 +1755,18 @@
                     </tr>`;
                 }).join('');
             } catch (e) { }
+        }
+        async function clearLogs() {
+            if (!confirm(t('logs.confirmClear'))) return;
+            await fetch('/admin/api/logs', { method: 'DELETE', headers: { 'X-Admin-Password': password } });
+            loadLogs();
+        }
+        async function updateLogRetention() {
+            const days = parseInt(document.getElementById('logRetentionSelect').value);
+            await fetch('/admin/api/logs/retention', {
+                method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ days })
+            });
         }
         async function loadAccounts() {
             const res = await fetch('/admin/api/accounts', { headers: { 'X-Admin-Password': password } });

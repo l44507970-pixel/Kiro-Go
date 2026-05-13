@@ -37,7 +37,7 @@ type Handler struct {
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
 	// 请求日志
-	requestLogs *RequestLogBuffer
+	requestLogs *RequestLogStore
 }
 
 type thinkingStreamSource int
@@ -150,7 +150,7 @@ func NewHandler() *Handler {
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
-		requestLogs:     NewRequestLogBuffer(200),
+		requestLogs:     NewRequestLogStore("data"),
 	}
 	// 启动后台刷新
 	go h.backgroundRefresh()
@@ -1876,6 +1876,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiExportAccounts(w, r)
 	case path == "/logs" && r.Method == "GET":
 		h.apiGetLogs(w, r)
+	case path == "/logs" && r.Method == "DELETE":
+		h.apiClearLogs(w, r)
+	case path == "/logs/retention" && r.Method == "GET":
+		h.apiGetLogRetention(w, r)
+	case path == "/logs/retention" && r.Method == "POST":
+		h.apiUpdateLogRetention(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -3045,15 +3051,49 @@ func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
 			n = v
 		}
 	}
-	if n > 200 {
-		n = 200
+	if n > 500 {
+		n = 500
 	}
 	logs := h.requestLogs.Recent(n)
 	if logs == nil {
 		logs = []RequestLog{}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"total": h.requestLogs.Count(),
-		"logs":  logs,
+		"total":         h.requestLogs.Count(),
+		"retentionDays": config.GetLogRetentionDays(),
+		"logs":          logs,
 	})
+}
+
+func (h *Handler) apiClearLogs(w http.ResponseWriter, r *http.Request) {
+	h.requestLogs.Clear()
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+func (h *Handler) apiGetLogRetention(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"retentionDays": config.GetLogRetentionDays(),
+	})
+}
+
+func (h *Handler) apiUpdateLogRetention(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Days int `json:"days"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.Days != 7 && req.Days != 14 && req.Days != 30 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Days must be 7, 14, or 30"})
+		return
+	}
+	if err := config.UpdateLogRetentionDays(req.Days); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "retentionDays": req.Days})
 }
