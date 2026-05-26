@@ -46,6 +46,9 @@ func NewRequestLogStore(dataDir string) *RequestLogStore {
 }
 
 func (s *RequestLogStore) Add(log RequestLog) {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.entries = append(s.entries, log)
 	s.mu.Unlock()
@@ -53,6 +56,9 @@ func (s *RequestLogStore) Add(log RequestLog) {
 
 // Recent 返回最近 n 条记录（按时间倒序）
 func (s *RequestLogStore) Recent(n int) []RequestLog {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -73,6 +79,9 @@ func (s *RequestLogStore) Recent(n int) []RequestLog {
 
 // Page 返回分页结果（按时间倒序）和总数
 func (s *RequestLogStore) Page(page, pageSize int) ([]RequestLog, int) {
+	if s == nil {
+		return nil, 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -109,6 +118,9 @@ func (s *RequestLogStore) Page(page, pageSize int) ([]RequestLog, int) {
 }
 
 func (s *RequestLogStore) Count() int {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.entries)
@@ -116,6 +128,9 @@ func (s *RequestLogStore) Count() int {
 
 // Clear 手动清除所有日志
 func (s *RequestLogStore) Clear() {
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.entries = nil
 	s.mu.Unlock()
