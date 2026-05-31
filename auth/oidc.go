@@ -17,6 +17,16 @@ import (
 // 调用方应立即禁用对应凭据，不再累计重试。
 var ErrInvalidGrant = errors.New("refresh token invalid_grant")
 
+// oidcTokenURL 构造 idc/builderId 刷新 endpoint。测试可替换以拦截网络调用。
+var oidcTokenURL = func(region string) string {
+	return fmt.Sprintf("https://oidc.%s.amazonaws.com/token", region)
+}
+
+// socialTokenURL 构造 social 刷新 endpoint。测试可替换以拦截网络调用。
+var socialTokenURL = func() string {
+	return "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+}
+
 // RefreshResult 包含一次 token 刷新的全部产物。
 type RefreshResult struct {
 	AccessToken  string
@@ -89,7 +99,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 		region = "us-east-1"
 	}
 
-	url := fmt.Sprintf("https://oidc.%s.amazonaws.com/token", region)
+	url := oidcTokenURL(region)
 
 	payload := map[string]string{
 		"clientId":     clientID,
@@ -134,7 +144,7 @@ func refreshOIDCToken(refreshToken, clientID, clientSecret, region string, clien
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
 func refreshSocialToken(refreshToken string, client *http.Client) (RefreshResult, error) {
-	url := "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken"
+	url := socialTokenURL()
 
 	payload := map[string]string{
 		"refreshToken": refreshToken,

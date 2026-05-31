@@ -1,5 +1,5 @@
 {
-  "version": "1.1.1",
-  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 11b0c91，v1.1.1）\n✨ 上游新增：批量删除账号、页面内容和中英文文案更新、Reload 账号过滤尊重 allowOverUsage、版本升级至 v1.1.1\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、admin 面板日志页面、cookie 导入登录、多 API Key 管理、本地 thinking/工具调用兼容增强、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
+  "version": "1.1.2",
+  "changelog": "🔀 合并上游 Quorinex/Kiro-Go main（截至 a2e3971，v1.1.2）\n✨ 上游新增：修复 agent 长会话工具调用转换/token 计数/历史污染/上游 400、tool_result 图片提取、profile ARN 瞬时失败处理、自动过期 bug、复制按钮响应、更新提示打开详情与检查 UI 一致性\n🆕 保留本地：请求调用日志（环形缓冲 + 持久化 + 保留天数 + 分页 + 手动清除）、admin 面板日志页面、cookie 导入登录、多 API Key 管理、本地 thinking/工具调用兼容增强、Claude Opus 4.7（1M 上下文）、KIRO_API_KEY 凭据类型",
   "download": "https://github.com/Quorinex/Kiro-Go"
 }
